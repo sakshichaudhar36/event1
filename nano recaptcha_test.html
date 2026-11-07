@@ -1,0 +1,37 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AWS Event CAPTCHA Tester</title>
+    <script src="https://www.google.com/recaptcha/api.js" async defer></script>
+</head>
+<body>
+    <h2>AWS Event - CAPTCHA Testing</h2>
+
+    <div class="g-recaptcha"
+         data-sitekey="6LcodBQuAAAAAFXb744-ifrxgp49c3d6P2p2saRL">
+    </div>
+
+    <br>
+
+    <button onclick="generateToken()">Get CAPTCHA Token</button>
+
+    <br><br>
+
+    <textarea id="token" rows="5" cols="70"
+              placeholder="Your token will appear here"></textarea>
+
+    <script>
+        function generateToken() {
+            const token = grecaptcha.getResponse();
+
+            if (!token) {
+                alert("Complete the CAPTCHA first");
+                return;
+            }
+
+            document.getElementById("token").value = token;
+        }
+    </script>
+</body>
+</html>
