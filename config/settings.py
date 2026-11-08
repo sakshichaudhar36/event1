@@ -66,6 +66,7 @@ INSTALLED_APPS = [
 
     "rest_framework",
     "rest_framework.authtoken",
+    "corsheaders",
 
     "accounts",
     "events",
@@ -88,7 +89,7 @@ RECAPTCHA_SITE_KEY = os.getenv("RECAPTCHA_SITE_KEY")
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
-
+    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -136,6 +137,7 @@ WSGI_APPLICATION = "config.wsgi.application"
 # DATABASE - POSTGRESQL
 # --------------------------------------------------
 
+
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -145,11 +147,11 @@ DATABASES = {
         "HOST": os.getenv("PGHOST"),
         "PORT": os.getenv("PGPORT", "5432"),
         "OPTIONS": {
-            "sslmode": os.getenv("PGSSLMODE", "require"),
+            "sslmode": "require",
         },
-        "CONN_MAX_AGE": 600,
     }
 }
+
 
 
 # --------------------------------------------------
@@ -255,3 +257,18 @@ EMAIL_TIMEOUT = 30
 
 if not EMAIL_HOST_USER or not EMAIL_HOST_PASSWORD:
     raise ValueError("Gmail credentials are missing from environment variables")
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://your-frontend.vercel.app",
+]
+CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = [
+    "https://your-frontend.vercel.app",
+]

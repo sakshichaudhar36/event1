@@ -5,7 +5,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from accounts.permissions import IsSuperUser
 
 from accounts.models import StudentProfile
 from qr.models import StudentQR
@@ -87,7 +87,7 @@ def mark_student_attendance(student, method):
 
 class QRStudentLookupView(APIView):
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsSuperUser]
 
     def post(self, request):
 
@@ -139,7 +139,7 @@ class QRStudentLookupView(APIView):
 
 class StudentLookupView(APIView):
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsSuperUser]
 
     def post(self, request):
 
@@ -189,7 +189,7 @@ class StudentLookupView(APIView):
 
 class QRAttendanceView(APIView):
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsSuperUser]
 
     def post(self, request):
 
@@ -223,7 +223,7 @@ class QRAttendanceView(APIView):
 
 class ManualAttendanceView(APIView):
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsSuperUser]
 
     def post(self, request):
 
@@ -255,7 +255,7 @@ class ManualAttendanceView(APIView):
 
 class AttendanceListView(APIView):
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsSuperUser]
 
     def get(self, request):
 
@@ -293,7 +293,7 @@ class AttendanceListView(APIView):
 
 class AttendanceSummaryView(APIView):
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsSuperUser]
 
     def get(self, request):
 

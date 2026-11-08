@@ -1,23 +1,26 @@
 
-import json
 import logging
 import secrets
 import uuid
-import urllib.parse
-import urllib.request
+from django.contrib.auth import authenticate
+import requests
+from django.db import transaction
+from django.db.models.deletion import ProtectedError
 
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+
+from .permissions import IsSuperUser
 from datetime import timedelta
-from urllib.error import HTTPError, URLError
 
 from django.conf import settings
-from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
 from django.utils.text import slugify
-import requests
-from django.conf import settings
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -35,18 +38,20 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------
 # GOOGLE RECAPTCHA V2 VERIFICATION
 # --------------------------------------------------
-def verify_recaptcha(captcha_token):
-    if not captcha_token:
-        print("CAPTCHA ERROR: Token is missing")
-        return False
 
-    secret = settings.RECAPTCHA_SECRET_KEY
+def verify_recaptcha(captcha_token):
+
+    if not captcha_token:
+        return False, ["missing-input-response"]
+
+    secret = getattr(settings, "RECAPTCHA_SECRET_KEY", None)
 
     if not secret:
-        print("CAPTCHA ERROR: Secret key is not loaded")
-        return False
+        logger.error("RECAPTCHA_SECRET_KEY is not configured")
+        return False, ["missing-input-secret"]
 
     try:
+
         response = requests.post(
             "https://www.google.com/recaptcha/api/siteverify",
             data={
@@ -56,14 +61,24 @@ def verify_recaptcha(captcha_token):
             timeout=10
         )
 
+        response.raise_for_status()
+
         result = response.json()
-        print("CAPTCHA GOOGLE RESPONSE:", result)
 
-        return result.get("success", False)
+        logger.info("Google CAPTCHA success: %s",
+                    result.get("success"))
 
-    except requests.RequestException as error:
-        print("CAPTCHA REQUEST ERROR:", error)
-        return False
+        return (
+            result.get("success", False),
+            result.get("error-codes", [])
+        )
+
+    except (requests.RequestException, ValueError):
+
+        logger.exception("Google CAPTCHA verification request failed")
+
+        return False, ["verification-request-failed"]
+
 
 # --------------------------------------------------
 # OTP GENERATION
@@ -71,7 +86,7 @@ def verify_recaptcha(captcha_token):
 
 def generate_otp():
 
-   return str(secrets.randbelow(900000) + 100000)
+    return str(secrets.randbelow(900000) + 100000)
 
 
 # --------------------------------------------------
@@ -80,22 +95,22 @@ def generate_otp():
 
 def send_student_otp(user, name, otp):
 
-   send_mail(
-       subject="AWS Event - Email Verification",
+    return send_mail(
+        subject="AWS Event - Email Verification",
 
-       message=(
-           f"Hello {name},\n\n"
-           f"Your OTP is {otp}.\n\n"
-           "Your OTP expires in 5 minutes.\n\n"
-           "AWS Event Team"
-       ),
+        message=(
+            f"Hello {name},\n\n"
+            f"Your OTP is {otp}.\n\n"
+            "Your OTP expires in 5 minutes.\n\n"
+            "AWS Event Team"
+        ),
 
-       from_email=settings.DEFAULT_FROM_EMAIL,
+        from_email=settings.DEFAULT_FROM_EMAIL,
 
-       recipient_list=[user.email],
+        recipient_list=[user.email],
 
-       fail_silently=False
-   )
+        fail_silently=False
+    )
 
 
 # --------------------------------------------------
@@ -104,14 +119,16 @@ def send_student_otp(user, name, otp):
 
 def send_qr_email_safely(profile):
 
-   try:
-       send_student_qr_email(profile)
+    try:
 
-   except Exception:
-       logger.exception(
-           "QR email failed for student %s",
-           profile.student_no
-       )
+        send_student_qr_email(profile)
+
+    except Exception:
+
+        logger.exception(
+            "QR email failed for student %s",
+            profile.student_no
+        )
 
 
 # --------------------------------------------------
@@ -120,243 +137,257 @@ def send_qr_email_safely(profile):
 
 class RegisterView(APIView):
 
-   def post(self, request):
+    def post(self, request):
 
-       # 1. Verify Google reCAPTCHA first
+        # 1. Validate registration data
 
-       captcha_token = request.data.get(
-           "g-recaptcha-response"
-       )
+        serializer = RegisterSerializer(data=request.data)
 
-       if not verify_recaptcha(captcha_token):
+        if not serializer.is_valid():
 
-           return Response(
-               {
-                   "error": "CAPTCHA verification failed. Please try again."
-               },
-               status=status.HTTP_400_BAD_REQUEST
-           )
+            return Response(
+                {
+                    "success": False,
+                    "errors": serializer.errors
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-       # 2. Validate registration data
+        data = serializer.validated_data
 
-       serializer = RegisterSerializer(
-           data=request.data
-       )
+        # 2. Verify Google reCAPTCHA
 
-       if not serializer.is_valid():
+        captcha_token = data.get("recaptcha_token")
 
-           return Response(
-               serializer.errors,
-               status=status.HTTP_400_BAD_REQUEST
-           )
+        captcha_valid, captcha_errors = verify_recaptcha(
+            captcha_token
+        )
 
-       data = serializer.validated_data
+        if not captcha_valid:
 
-       email = data["email"].strip().lower()
+            return Response(
+                {
+                    "success": False,
+                    "error": "CAPTCHA verification failed. Please try again.",
+                    "details": captcha_errors
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-       otp = generate_otp()
+        # Remove CAPTCHA token before saving student details
 
-       # 3. Generate unique internal username
+        data.pop("recaptcha_token")
 
-       username_base = slugify(data["name"])[:140] or "student"
+        email = data["email"].strip().lower()
 
-       username = (
-           f"{username_base}_{uuid.uuid4().hex[:8]}"
-       )
+        # 3. Generate OTP
 
-       # 4. Create student and send OTP
+        otp = generate_otp()
 
-       try:
+        # 4. Generate unique username
 
-           with transaction.atomic():
+        username_base = slugify(data["name"])[:140] or "student"
 
-               user = User.objects.create_user(
-                   username=username,
-                   email=email,
-                   password=data["password"],
-                   is_active=False
-               )
+        username = f"{username_base}_{uuid.uuid4().hex[:8]}"
 
-               profile = StudentProfile.objects.create(
-                   user=user,
-                   name=data["name"],
-                   section=data["section"],
-                   year=data["year"],
-                   residence=data["residence"],
-                   phone_no=data["phone_no"],
-                   roll_no=data["roll_no"],
-                   student_no=data["student_no"],
-                   is_email_verified=False
-               )
+        # 5. Create User, StudentProfile and EmailOTP
 
-               EmailOTP.objects.create(
-                   user=user,
-                   otp=otp,
-                   expires_at=(
-                       timezone.now() + timedelta(minutes=5)
-                   )
-               )
+        try:
 
-               send_student_otp(
-                   user,
-                   profile.name,
-                   otp
-               )
+            with transaction.atomic():
 
-       except Exception:
+                user = User.objects.create_user(
+                    username=username,
+                    email=email,
+                    password=None,
+                    is_active=False
+                )
 
-           logger.exception("Student registration failed")
+                profile = StudentProfile.objects.create(
+                    user=user,
+                    name=data["name"],
+                    section=data["section"],
+                    year=data["year"],
+                    residence=data["residence"],
+                    gender=data["gender"],
+                    phone_no=data["phone_no"],
+                    roll_no=data["roll_no"],
+                    student_no=data["student_no"],
+                    is_email_verified=False
+                )
 
-           return Response(
-               {
-                   "error": "Registration failed. Please check your details and try again."
-               },
-               status=status.HTTP_500_INTERNAL_SERVER_ERROR
-           )
+                EmailOTP.objects.create(
+                    user=user,
+                    otp=otp,
+                    expires_at=(
+                        timezone.now() + timedelta(minutes=5)
+                    )
+                )
 
-       return Response(
-           {
-               "message": "Registration successful. OTP sent to your email.",
-               "name": profile.name,
-               "email": user.email,
-               "student_no": profile.student_no
-           },
-           status=status.HTTP_201_CREATED
-       )
+                # Send OTP email
+
+                email_sent = send_student_otp(
+                    user,
+                    profile.name,
+                    otp
+                )
+
+                if email_sent != 1:
+                    raise RuntimeError("OTP email could not be sent")
+
+        except Exception:
+
+            logger.exception("Student registration failed")
+
+            return Response(
+                {
+                    "success": False,
+                    "error": "Registration failed. Please check your details and try again."
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        return Response(
+            {
+                "success": True,
+                "message": "Registration successful. OTP sent to your email.",
+                "name": profile.name,
+                "email": user.email,
+                "student_no": profile.student_no
+            },
+            status=status.HTTP_201_CREATED
+        )
 
 
 # --------------------------------------------------
-# VERIFY OTP API
+# VERIFY REGISTRATION OTP API
 # --------------------------------------------------
 
 class VerifyOTPView(APIView):
 
-   def post(self, request):
+    def post(self, request):
 
-       email = (
-           request.data.get("email") or ""
-       ).strip().lower()
+        email = (
+            request.data.get("email") or ""
+        ).strip().lower()
 
-       student_no = (
-           request.data.get("student_no") or ""
-       ).strip()
+        student_no = (
+            request.data.get("student_no") or ""
+        ).strip()
 
-       otp = (
-           request.data.get("otp") or ""
-       ).strip()
+        otp = (
+            request.data.get("otp") or ""
+        ).strip()
 
-       if not email or not student_no or not otp:
+        if not email or not student_no or not otp:
 
-           return Response(
-               {
-                   "error": "Email, student number and OTP are required."
-               },
-               status=status.HTTP_400_BAD_REQUEST
-           )
+            return Response(
+                {
+                    "error": "Email, student number and OTP are required."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-       # Find the exact student, not just the Gmail address
+        try:
 
-       try:
+            profile = StudentProfile.objects.select_related(
+                "user"
+            ).get(
+                student_no=student_no,
+                user__email__iexact=email
+            )
 
-           profile = StudentProfile.objects.select_related(
-               "user"
-           ).get(
-               student_no=student_no,
-               user__email__iexact=email
-           )
+        except StudentProfile.DoesNotExist:
 
-       except StudentProfile.DoesNotExist:
+            return Response(
+                {
+                    "error": "Student account not found with these details."
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
 
-           return Response(
-               {
-                   "error": "Student account not found with these details."
-               },
-               status=status.HTTP_404_NOT_FOUND
-           )
+        user = profile.user
 
-       user = profile.user
+        if profile.is_email_verified or user.is_active:
 
-       if profile.is_email_verified or user.is_active:
+            return Response(
+                {
+                    "message": "This student account is already verified."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-           return Response(
-               {
-                   "message": "This student account is already verified."
-               },
-               status=status.HTTP_400_BAD_REQUEST
-           )
+        with transaction.atomic():
 
-       # Lock and verify the latest OTP
+            otp_record = EmailOTP.objects.select_for_update().filter(
+                user=user
+            ).order_by("-created_at").first()
 
-       with transaction.atomic():
+            if otp_record is None:
 
-           otp_record = EmailOTP.objects.select_for_update().filter(
-               user=user
-           ).order_by("-created_at").first()
+                return Response(
+                    {
+                        "error": "OTP not found. Please request a new OTP."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-           if otp_record is None:
+            if otp_record.expires_at < timezone.now():
 
-               return Response(
-                   {
-                       "error": "OTP not found. Please request a new OTP."
-                   },
-                   status=status.HTTP_400_BAD_REQUEST
-               )
+                return Response(
+                    {
+                        "error": "OTP has expired. Please request a new OTP."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-           if otp_record.expires_at < timezone.now():
+            if not secrets.compare_digest(
+                str(otp_record.otp),
+                otp
+            ):
 
-               return Response(
-                   {
-                       "error": "OTP has expired. Please request a new OTP."
-                   },
-                   status=status.HTTP_400_BAD_REQUEST
-               )
+                return Response(
+                    {
+                        "error": "Incorrect OTP."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-           if not secrets.compare_digest(
-               str(otp_record.otp),
-               otp
-           ):
+            # Activate student account
 
-               return Response(
-                   {
-                       "error": "Incorrect OTP."
-                   },
-                   status=status.HTTP_400_BAD_REQUEST
-               )
+            profile.is_email_verified = True
 
-           # Activate student
+            profile.save(
+                update_fields=["is_email_verified"]
+            )
 
-           profile.is_email_verified = True
+            user.is_active = True
 
-           profile.save(
-               update_fields=["is_email_verified"]
-           )
+            user.save(
+                update_fields=["is_active"]
+            )
 
-           user.is_active = True
+            # Delete used OTP
 
-           user.save(
-               update_fields=["is_active"]
-           )
+            EmailOTP.objects.filter(
+                user=user
+            ).delete()
 
-           # Delete used OTP
+            # Send QR email after database commit
 
-           EmailOTP.objects.filter(
-               user=user
-           ).delete()
+            transaction.on_commit(
+                lambda: send_qr_email_safely(profile)
+            )
 
-           # Send permanent QR email after database commit
-
-           transaction.on_commit(
-               lambda: send_qr_email_safely(profile)
-           )
-
-       return Response(
-           {
-               "message": "Email verified successfully. Your account is activated.",
-               "student_no": profile.student_no,
-               "qr_email": "QR email sending was attempted."
-           },
-           status=status.HTTP_200_OK
-       )
+        return Response(
+            {
+                "success": True,
+                "message": "Email verified successfully. Your account is activated.",
+                "student_no": profile.student_no,
+                "qr_email": "QR email sending was attempted."
+            },
+            status=status.HTTP_200_OK
+        )
 
 
 # --------------------------------------------------
@@ -365,179 +396,453 @@ class VerifyOTPView(APIView):
 
 class ResendOTPView(APIView):
 
-   def post(self, request):
+    def post(self, request):
 
-       email = (
-           request.data.get("email") or ""
-       ).strip().lower()
+        email = (
+            request.data.get("email") or ""
+        ).strip().lower()
 
-       student_no = (
-           request.data.get("student_no") or ""
-       ).strip()
+        student_no = (
+            request.data.get("student_no") or ""
+        ).strip()
 
-       if not email or not student_no:
+        if not email or not student_no:
 
-           return Response(
-               {
-                   "error": "Email and student number are required."
-               },
-               status=status.HTTP_400_BAD_REQUEST
-           )
+            return Response(
+                {
+                    "error": "Email and student number are required."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-       try:
+        try:
 
-           profile = StudentProfile.objects.select_related(
-               "user"
-           ).get(
-               student_no=student_no,
-               user__email__iexact=email
-           )
+            profile = StudentProfile.objects.select_related(
+                "user"
+            ).get(
+                student_no=student_no,
+                user__email__iexact=email
+            )
 
-       except StudentProfile.DoesNotExist:
+        except StudentProfile.DoesNotExist:
 
-           return Response(
-               {
-                   "error": "Student account not found."
-               },
-               status=status.HTTP_404_NOT_FOUND
-           )
+            return Response(
+                {
+                    "error": "Student account not found."
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
 
-       user = profile.user
+        user = profile.user
 
-       if profile.is_email_verified or user.is_active:
+        if profile.is_email_verified or user.is_active:
 
-           return Response(
-               {
-                   "error": "This student is already verified. Please login."
-               },
-               status=status.HTTP_400_BAD_REQUEST
-           )
+            return Response(
+                {
+                    "error": "This student is already verified. Please login."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-       otp = generate_otp()
+        otp = generate_otp()
 
-       try:
+        try:
 
-           with transaction.atomic():
+            with transaction.atomic():
 
-               # Remove old OTP
+                # Remove previous OTP
 
-               EmailOTP.objects.filter(
-                   user=user
-               ).delete()
+                EmailOTP.objects.filter(
+                    user=user
+                ).delete()
 
-               # Create new OTP
+                # Create new OTP
 
-               EmailOTP.objects.create(
-                   user=user,
-                   otp=otp,
-                   expires_at=(
-                       timezone.now() + timedelta(minutes=5)
-                   )
-               )
+                EmailOTP.objects.create(
+                    user=user,
+                    otp=otp,
+                    expires_at=(
+                        timezone.now() + timedelta(minutes=5)
+                    )
+                )
 
-               # Send new OTP
+                # Send new OTP
 
-               send_student_otp(
-                   user,
-                   profile.name,
-                   otp
-               )
+                email_sent = send_student_otp(
+                    user,
+                    profile.name,
+                    otp
+                )
 
-       except Exception:
+                if email_sent != 1:
+                    raise RuntimeError("OTP email could not be sent")
 
-           logger.exception("OTP resend failed")
+        except Exception:
 
-           return Response(
-               {
-                   "error": "Unable to send OTP. Please try again later."
-               },
-               status=status.HTTP_500_INTERNAL_SERVER_ERROR
-           )
+            logger.exception("OTP resend failed")
 
-       return Response(
-           {
-               "message": "A new OTP has been sent successfully.",
-               "student_no": profile.student_no
-           },
-           status=status.HTTP_200_OK
-       )
+            return Response(
+                {
+                    "error": "Unable to send OTP. Please try again later."
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        return Response(
+            {
+                "success": True,
+                "message": "A new OTP has been sent successfully.",
+                "student_no": profile.student_no
+            },
+            status=status.HTTP_200_OK
+        )
 
 
 # --------------------------------------------------
-# LOGIN API
+# PASSWORDLESS LOGIN - SEND OTP
 # --------------------------------------------------
 
 class LoginView(APIView):
 
-   def post(self, request):
+    def post(self, request):
 
-       student_no = (
-           request.data.get("student_no") or ""
-       ).strip()
+        student_no = (
+            request.data.get("student_no") or ""
+        ).strip()
 
-       password = request.data.get("password") or ""
+        if not student_no:
 
-       if not student_no or not password:
+            return Response(
+                {
+                    "error": "Student number is required."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-           return Response(
-               {
-                   "error": "Student number and password are required."
-               },
-               status=status.HTTP_400_BAD_REQUEST
-           )
+        try:
 
-       try:
+            profile = StudentProfile.objects.select_related(
+                "user"
+            ).get(
+                student_no=student_no
+            )
 
-           profile = StudentProfile.objects.select_related(
-               "user"
-           ).get(
-               student_no=student_no
-           )
+        except StudentProfile.DoesNotExist:
 
-       except StudentProfile.DoesNotExist:
+            return Response(
+                {
+                    "error": "Student account not found."
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
 
-           return Response(
-               {
-                   "error": "Invalid student number or password."
-               },
-               status=status.HTTP_401_UNAUTHORIZED
-           )
+        user = profile.user
 
-       user = authenticate(
-           username=profile.user.username,
-           password=password
-       )
+        if not user.is_active or not profile.is_email_verified:
 
-       if user is None:
+            return Response(
+                {
+                    "error": "Please verify your email before logging in."
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-           return Response(
-               {
-                   "error": "Invalid student number or password."
-               },
-               status=status.HTTP_401_UNAUTHORIZED
-           )
+        otp = generate_otp()
 
-       if not user.is_active or not profile.is_email_verified:
+        try:
 
-           return Response(
-               {
-                   "error": "Please verify your email before logging in."
-               },
-               status=status.HTTP_403_FORBIDDEN
-           )
+            with transaction.atomic():
 
-       token, created = Token.objects.get_or_create(
-           user=user
-       )
+                # Delete previous login OTP
 
-       return Response(
-           {
-               "message": "Login successful.",
-               "name": profile.name,
-               "email": user.email,
-               "student_no": profile.student_no,
-               "token": token.key
-           },
-           status=status.HTTP_200_OK
-       )
+                EmailOTP.objects.filter(
+                    user=user
+                ).delete()
 
+                # Generate new login OTP
+
+                EmailOTP.objects.create(
+                    user=user,
+                    otp=otp,
+                    expires_at=(
+                        timezone.now() + timedelta(minutes=5)
+                    )
+                )
+
+                email_sent = send_student_otp(
+                    user,
+                    profile.name,
+                    otp
+                )
+
+                if email_sent != 1:
+                    raise RuntimeError("Login OTP email could not be sent")
+
+        except Exception:
+
+            logger.exception("Login OTP sending failed")
+
+            return Response(
+                {
+                    "error": "Unable to send login OTP. Please try again."
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        return Response(
+            {
+                "success": True,
+                "message": "Login OTP sent to your registered email.",
+                "student_no": profile.student_no
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+# --------------------------------------------------
+# PASSWORDLESS LOGIN - VERIFY OTP
+# --------------------------------------------------
+
+class VerifyLoginOTPView(APIView):
+
+    def post(self, request):
+
+        student_no = (
+            request.data.get("student_no") or ""
+        ).strip()
+
+        email = (
+            request.data.get("email") or ""
+        ).strip().lower()
+
+        otp = (
+            request.data.get("otp") or ""
+        ).strip()
+
+        if not student_no or not email or not otp:
+
+            return Response(
+                {
+                    "error": "Student number, email and OTP are required."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+
+            profile = StudentProfile.objects.select_related(
+                "user"
+            ).get(
+                student_no=student_no,
+                user__email__iexact=email
+            )
+
+        except StudentProfile.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Invalid student details."
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        user = profile.user
+
+        if not user.is_active or not profile.is_email_verified:
+
+            return Response(
+                {
+                    "error": "Please verify your email before logging in."
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        with transaction.atomic():
+
+            otp_record = EmailOTP.objects.select_for_update().filter(
+                user=user
+            ).order_by("-created_at").first()
+
+            if otp_record is None:
+
+                return Response(
+                    {
+                        "error": "OTP not found. Please request a new OTP."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if otp_record.expires_at < timezone.now():
+
+                return Response(
+                    {
+                        "error": "OTP has expired. Please request a new OTP."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if not secrets.compare_digest(
+                str(otp_record.otp),
+                otp
+            ):
+
+                return Response(
+                    {
+                        "error": "Incorrect OTP."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # OTP is valid. Delete it to prevent reuse.
+
+            EmailOTP.objects.filter(
+                user=user
+            ).delete()
+
+            # Generate authentication token
+
+            token, created = Token.objects.get_or_create(
+                user=user
+            )
+
+        return Response(
+            {
+                "success": True,
+                "message": "Login successful.",
+                "name": profile.name,
+                "email": user.email,
+                "student_no": profile.student_no,
+                "token": token.key
+            },
+            status=status.HTTP_200_OK
+        )
+class SuperuserLoginView(APIView):
+
+    def post(self, request):
+
+        username = request.data.get("username", "").strip()
+        password = request.data.get("password", "")
+
+        if not username or not password:
+            return Response(
+                {"error": "Username and password are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user = authenticate(
+            username=username,
+            password=password
+        )
+
+        if (
+            user is None
+            or not user.is_active
+            or not user.is_superuser
+        ):
+            return Response(
+                {"error": "Invalid superuser credentials."},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        token, _ = Token.objects.get_or_create(user=user)
+
+        return Response(
+            {
+                "message": "Superuser login successful.",
+                "username": user.username,
+                "token": token.key
+            },
+            status=status.HTTP_200_OK
+        )
+
+class DeleteRegistrationView(APIView):
+
+    permission_classes = [IsSuperUser]
+
+    def delete(self, request):
+
+        student_no = request.data.get("student_no")
+
+        # Check student number
+        if not student_no:
+            return Response(
+                {
+                    "success": False,
+                    "message": "Student number is required."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Find student registration
+        try:
+            student = StudentProfile.objects.select_related(
+                "user"
+            ).get(student_no=student_no)
+
+        except StudentProfile.DoesNotExist:
+            return Response(
+                {
+                    "success": False,
+                    "message": "Registration not found."
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        user = student.user
+
+        # Protect admin accounts
+        if user.is_superuser or user.is_staff:
+            return Response(
+                {
+                    "success": False,
+                    "message": "Admin accounts cannot be deleted."
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Save details before deletion
+        student_name = student.name
+        registration_id = student.student_no
+        student_email = user.email
+
+        try:
+            with transaction.atomic():
+
+                # Delete account.
+                # Student profile and related QR/attendance
+                # records will follow their model's FK rules.
+                user.delete()
+
+            return Response(
+                {
+                    "success": True,
+                    "message": "Registration deleted successfully.",
+                    "deleted_student": {
+                        "name": student_name,
+                        "student_no": registration_id,
+                        "email": student_email
+                    }
+                },
+                status=status.HTTP_200_OK
+            )
+
+        except ProtectedError:
+            return Response(
+                {
+                    "success": False,
+                    "message": (
+                        "Cannot delete registration because "
+                        "protected related records exist."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+
+        except Exception:
+            return Response(
+                {
+                    "success": False,
+                    "message": "An unexpected error occurred while deleting registration."
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

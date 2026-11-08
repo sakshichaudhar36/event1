@@ -1,3 +1,4 @@
+
 from django.db import models
 from django.contrib.auth.models import User
 
@@ -8,8 +9,6 @@ class StudentProfile(models.Model):
         User,
         on_delete=models.CASCADE
     )
-
-    # NEW STUDENT DETAILS
 
     name = models.CharField(max_length=100)
 
@@ -37,6 +36,17 @@ class StudentProfile(models.Model):
         choices=RESIDENCE_CHOICES
     )
 
+    GENDER_CHOICES = [
+        ("Male", "Male"),
+        ("Female", "Female"),
+        ("Other", "Other"),
+    ]
+
+    gender = models.CharField(
+        max_length=10,
+        choices=GENDER_CHOICES
+    )
+
     phone_no = models.CharField(max_length=10)
 
     roll_no = models.CharField(
@@ -49,14 +59,10 @@ class StudentProfile(models.Model):
         unique=True
     )
 
-    # EXISTING EMAIL VERIFICATION FIELD
-
-    is_email_verified = models.BooleanField(
-        default=False
-    )
+    is_email_verified = models.BooleanField(default=False)
 
     def __str__(self):
-        return self.user.username
+        return self.name
 
 
 class EmailOTP(models.Model):
@@ -68,11 +74,11 @@ class EmailOTP(models.Model):
 
     otp = models.CharField(max_length=6)
 
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
     expires_at = models.DateTimeField()
 
+    is_used = models.BooleanField(default=False)
+
     def __str__(self):
-        return f"OTP for {self.user.username}"
+        return f"OTP for {self.user.email}"

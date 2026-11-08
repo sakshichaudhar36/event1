@@ -1,3 +1,4 @@
+
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.core.validators import validate_email
@@ -6,42 +7,39 @@ from django.core.exceptions import ValidationError
 from .models import StudentProfile
 import re
 
-# CHANGE THIS TO YOUR COLLEGE EMAIL DOMAIN
 COLLEGE_DOMAIN = "akgec.ac.in"
 
 
 class RegisterSerializer(serializers.Serializer):
 
-    name = serializers.CharField(max_length=150, required=True)
-    email = serializers.EmailField()
-    password = serializers.CharField(write_only=True)
-
-    # REGISTRATION FIELDS
+    name = serializers.CharField(max_length=100, required=True)
+    email = serializers.EmailField(required=True)
 
     section = serializers.CharField(max_length=20)
 
     year = serializers.ChoiceField(
-        choices=[
-            ("1st Year", "1st Year"),
-            ("2nd Year", "2nd Year"),
-            ("3rd Year", "3rd Year"),
-            ("4th Year", "4th Year"),
-        ]
+        choices=StudentProfile.YEAR_CHOICES
     )
 
     residence = serializers.ChoiceField(
-        choices=[
-            ("Hosteller", "Hosteller"),
-            ("Day Scholar", "Day Scholar"),
-        ]
+        choices=StudentProfile.RESIDENCE_CHOICES
+    )
+
+    gender = serializers.ChoiceField(
+        choices=StudentProfile.GENDER_CHOICES
     )
 
     phone_no = serializers.CharField(max_length=10)
     roll_no = serializers.CharField(max_length=30)
     student_no = serializers.CharField(max_length=30)
 
-    # NAME VALIDATION
+    # GOOGLE RECAPTCHA TOKEN
+    recaptcha_token = serializers.CharField(
+        write_only=True,
+        required=True
+    )
 
+    # NAME VALIDATION
     def validate_name(self, value):
 
         value = value.strip()
@@ -59,7 +57,6 @@ class RegisterSerializer(serializers.Serializer):
         return value
 
     # EMAIL VALIDATION
-
     def validate_email(self, value):
 
         value = value.lower().strip()
@@ -73,7 +70,7 @@ class RegisterSerializer(serializers.Serializer):
 
         domain = value.rsplit("@", 1)[-1]
 
-        if domain != COLLEGE_DOMAIN.lower():
+        if domain != COLLEGE_DOMAIN:
             raise serializers.ValidationError(
                 "Use your official college email."
             )
@@ -85,19 +82,7 @@ class RegisterSerializer(serializers.Serializer):
 
         return value
 
-    # PASSWORD VALIDATION
-
-    def validate_password(self, value):
-
-        if len(value) < 8:
-            raise serializers.ValidationError(
-                "Password must have atleast 8 characters."
-            )
-
-        return value
-
-    # PHONE NUMBER VALIDATION
-
+    # PHONE VALIDATION
     def validate_phone_no(self, value):
 
         if not re.fullmatch(r"[0-9]{10}", value):
@@ -108,7 +93,6 @@ class RegisterSerializer(serializers.Serializer):
         return value
 
     # ROLL NUMBER VALIDATION
-
     def validate_roll_no(self, value):
 
         value = value.strip()
@@ -124,7 +108,6 @@ class RegisterSerializer(serializers.Serializer):
         return value
 
     # STUDENT NUMBER VALIDATION
-
     def validate_student_no(self, value):
 
         value = value.strip()
@@ -138,3 +121,25 @@ class RegisterSerializer(serializers.Serializer):
             )
 
         return value
+
+    # CREATE USER AND STUDENT PROFILE
+    def create(self, validated_data):
+
+        email = validated_data.pop("email")
+
+        # Remove CAPTCHA token before saving profile
+        validated_data.pop("recaptcha_token")
+
+        user = User.objects.create_user(
+            username=email,
+            email=email,
+            password=None
+        )
+
+        StudentProfile.objects.create(
+            user=user,
+            **validated_data
+        )
+
+        return user
+ 
