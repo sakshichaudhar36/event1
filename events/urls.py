@@ -1,7 +1,8 @@
-
 from django.urls import path
 
 from .views import (
+    QRStudentLookupView,
+    StudentLookupView,
     QRAttendanceView,
     ManualAttendanceView,
     AttendanceListView,
@@ -9,20 +10,36 @@ from .views import (
 )
 
 urlpatterns = [
+
+    # Lookup APIs
     path(
-        "qr-attendance/",
+        "qr/lookup/",
+        QRStudentLookupView.as_view(),
+        name="qr-student-lookup"
+    ),
+
+    path(
+        "student/lookup/",
+        StudentLookupView.as_view(),
+        name="student-lookup"
+    ),
+
+    # Attendance APIs
+    path(
+        "qr/present/",
         QRAttendanceView.as_view(),
         name="qr-attendance"
     ),
 
     path(
-        "manual-attendance/",
+        "manual/present/",
         ManualAttendanceView.as_view(),
         name="manual-attendance"
     ),
 
+    # Attendance records
     path(
-        "attendance/",
+        "",
         AttendanceListView.as_view(),
         name="attendance-list"
     ),
