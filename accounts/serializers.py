@@ -3,8 +3,8 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
-
-from .models import StudentProfile
+from django.utils import timezone
+from .models import StudentProfile,PendingRegistration
 import re
 
 COLLEGE_DOMAIN = "akgec.ac.in"
@@ -14,7 +14,7 @@ class RegisterSerializer(serializers.Serializer):
 
     name = serializers.CharField(max_length=100, required=True)
     email = serializers.EmailField(required=True)
-
+    branch = serializers.CharField(max_length=100,required=True)
     section = serializers.CharField(max_length=20)
 
     year = serializers.ChoiceField(
@@ -56,6 +56,15 @@ class RegisterSerializer(serializers.Serializer):
 
         return value
 
+    def validate_branch(self, value):
+        value = value.strip()
+
+        if not value:
+            raise serializers.ValidationError("Branch is required.")
+
+        return value
+
+
     # EMAIL VALIDATION
     def validate_email(self, value):
 
@@ -79,6 +88,15 @@ class RegisterSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 "Email already registered."
             )
+
+        if PendingRegistration.objects.filter(
+            registration_expires_at__gt=timezone.now(),
+            registration_data__email=value
+        ).exists():
+            raise serializers.ValidationError(
+                "A registration for this email is already pending."
+            )
+
 
         return value
 
@@ -105,6 +123,14 @@ class RegisterSerializer(serializers.Serializer):
                 "Roll number already registered."
             )
 
+        if PendingRegistration.objects.filter(
+            registration_expires_at__gt=timezone.now(),
+            registration_data__roll_no=value
+        ).exists():
+            raise serializers.ValidationError(
+                "A registration with this roll number is already pending."
+            )
+
         return value
 
     # STUDENT NUMBER VALIDATION
@@ -120,26 +146,14 @@ class RegisterSerializer(serializers.Serializer):
                 "Student number already registered."
             )
 
+        if PendingRegistration.objects.filter(
+            registration_expires_at__gt=timezone.now(),
+            registration_data__student_no=value
+        ).exists():
+            raise serializers.ValidationError(
+                "A registration with this student number is already pending."
+            )
+
         return value
 
-    # CREATE USER AND STUDENT PROFILE
-    def create(self, validated_data):
-
-        email = validated_data.pop("email")
-
-        # Remove CAPTCHA token before saving profile
-        validated_data.pop("recaptcha_token")
-
-        user = User.objects.create_user(
-            username=email,
-            email=email,
-            password=None
-        )
-
-        StudentProfile.objects.create(
-            user=user,
-            **validated_data
-        )
-
-        return user
- 
+   

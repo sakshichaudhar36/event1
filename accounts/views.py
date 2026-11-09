@@ -26,10 +26,13 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.authtoken.models import Token
 
-from .models import StudentProfile, EmailOTP
+from .models import StudentProfile, EmailOTP, PendingRegistration
 from .serializers import RegisterSerializer
 
 from qr.services import send_student_qr_email
+
+from django.contrib.auth.hashers import make_password, check_password
+from django.db import IntegrityError
 
 
 logger = logging.getLogger(__name__)
@@ -112,6 +115,21 @@ def send_student_otp(user, name, otp):
         fail_silently=False
     )
 
+def send_pending_registration_otp(email, name, otp):
+
+    return send_mail(
+        subject="AWS Event - Email Verification",
+        message=(
+            f"Hello {name},\n\n"
+            f"Your OTP is {otp}.\n\n"
+            "Your OTP expires in 5 minutes.\n\n"
+            "AWS Event Team"
+        ),
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[email],
+        fail_silently=False
+    )
+
 
 # --------------------------------------------------
 # SEND QR EMAIL SAFELY
@@ -135,16 +153,15 @@ def send_qr_email_safely(profile):
 # REGISTER API
 # --------------------------------------------------
 
+
 class RegisterView(APIView):
 
     def post(self, request):
 
         # 1. Validate registration data
-
         serializer = RegisterSerializer(data=request.data)
 
         if not serializer.is_valid():
-
             return Response(
                 {
                     "success": False,
@@ -153,18 +170,16 @@ class RegisterView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        data = serializer.validated_data
+        data = serializer.validated_data.copy()
 
         # 2. Verify Google reCAPTCHA
-
-        captcha_token = data.get("recaptcha_token")
+        captcha_token = data.pop("recaptcha_token")
 
         captcha_valid, captcha_errors = verify_recaptcha(
             captcha_token
         )
 
         if not captcha_valid:
-
             return Response(
                 {
                     "success": False,
@@ -174,94 +189,115 @@ class RegisterView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Remove CAPTCHA token before saving student details
-
-        data.pop("recaptcha_token")
-
         email = data["email"].strip().lower()
+        now = timezone.now()
 
         # 3. Generate OTP
-
         otp = generate_otp()
 
-        # 4. Generate unique username
-
-        username_base = slugify(data["name"])[:140] or "student"
-
-        username = f"{username_base}_{uuid.uuid4().hex[:8]}"
-
-        # 5. Create User, StudentProfile and EmailOTP
-
         try:
-
             with transaction.atomic():
 
-                user = User.objects.create_user(
-                    username=username,
-                    email=email,
-                    password=None,
-                    is_active=False
-                )
+                # Remove expired pending registrations
+                PendingRegistration.objects.filter(
+                    registration_expires_at__lte=now
+                ).delete()
 
-                profile = StudentProfile.objects.create(
-                    user=user,
-                    name=data["name"],
-                    section=data["section"],
-                    year=data["year"],
-                    residence=data["residence"],
-                    gender=data["gender"],
-                    phone_no=data["phone_no"],
-                    roll_no=data["roll_no"],
-                    student_no=data["student_no"],
-                    is_email_verified=False
-                )
-
-                EmailOTP.objects.create(
-                    user=user,
-                    otp=otp,
-                    expires_at=(
-                        timezone.now() + timedelta(minutes=5)
+                # Recheck permanent records
+                if User.objects.filter(
+                    email__iexact=email
+                ).exists():
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Email already registered."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
                     )
+
+                if StudentProfile.objects.filter(
+                    roll_no__iexact=data["roll_no"]
+                ).exists():
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Roll number already registered."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                if StudentProfile.objects.filter(
+                    student_no__iexact=data["student_no"]
+                ).exists():
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Student number already registered."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Recheck pending registrations
+                if PendingRegistration.objects.filter(
+                    registration_expires_at__gt=now,
+                    registration_data__email=email
+                ).exists():
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Registration is already pending for this email."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # 4. Save temporary registration
+                pending = PendingRegistration.objects.create(
+                    registration_data=data,
+                    otp_hash=make_password(otp),
+                    attempts=0,
+                    otp_expires_at=now + timedelta(minutes=5),
+                    registration_expires_at=now + timedelta(minutes=10),
+                    otp_last_sent_at=now
                 )
 
-                # Send OTP email
-
-                email_sent = send_student_otp(
-                    user,
-                    profile.name,
+                # 5. Send OTP
+                email_sent = send_pending_registration_otp(
+                    email,
+                    data["name"],
                     otp
                 )
 
                 if email_sent != 1:
                     raise RuntimeError("OTP email could not be sent")
 
-        except Exception:
+            return Response(
+                {
+                    "success": True,
+                    "message": "Registration initiated. OTP sent to your email.",
+                    "registration_id": str(pending.registration_id),
+                    "name": data["name"],
+                    "email": email,
+                    "student_no": data["student_no"]
+                },
+                status=status.HTTP_201_CREATED
+            )
 
-            logger.exception("Student registration failed")
+        except Exception:
+            logger.exception("Pending registration failed")
 
             return Response(
                 {
                     "success": False,
-                    "error": "Registration failed. Please check your details and try again."
+                    "error": "Unable to initiate registration. Please try again."
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
-        return Response(
-            {
-                "success": True,
-                "message": "Registration successful. OTP sent to your email.",
-                "name": profile.name,
-                "email": user.email,
-                "student_no": profile.student_no
-            },
-            status=status.HTTP_201_CREATED
-        )
 
 
 # --------------------------------------------------
 # VERIFY REGISTRATION OTP API
 # --------------------------------------------------
+
 
 class VerifyOTPView(APIView):
 
@@ -280,119 +316,210 @@ class VerifyOTPView(APIView):
         ).strip()
 
         if not email or not student_no or not otp:
-
             return Response(
                 {
+                    "success": False,
                     "error": "Email, student number and OTP are required."
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        try:
-
-            profile = StudentProfile.objects.select_related(
-                "user"
-            ).get(
-                student_no=student_no,
-                user__email__iexact=email
-            )
-
-        except StudentProfile.DoesNotExist:
-
+        if not otp.isdigit() or len(otp) != 6:
             return Response(
                 {
-                    "error": "Student account not found with these details."
-                },
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        user = profile.user
-
-        if profile.is_email_verified or user.is_active:
-
-            return Response(
-                {
-                    "message": "This student account is already verified."
+                    "success": False,
+                    "error": "Enter a valid 6-digit OTP."
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        with transaction.atomic():
+        try:
+            with transaction.atomic():
 
-            otp_record = EmailOTP.objects.select_for_update().filter(
-                user=user
-            ).order_by("-created_at").first()
+                # Lock pending registration
+                pending = PendingRegistration.objects.select_for_update().filter(
+                    registration_data__email=email,
+                    registration_data__student_no=student_no
+                ).first()
 
-            if otp_record is None:
+                if pending is None:
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Pending registration not found."
+                        },
+                        status=status.HTTP_404_NOT_FOUND
+                    )
 
-                return Response(
-                    {
-                        "error": "OTP not found. Please request a new OTP."
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
+                now = timezone.now()
+
+                # Check registration expiry
+                if pending.registration_expires_at <= now:
+                    pending.delete()
+
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Registration expired. Please register again."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Check OTP expiry
+                if pending.otp_expires_at <= now:
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "OTP expired. Please request a new OTP."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Maximum 5 attempts
+                if pending.attempts >= 5:
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Maximum OTP attempts reached. Please resend OTP."
+                        },
+                        status=status.HTTP_429_TOO_MANY_REQUESTS
+                    )
+
+                # Verify hashed OTP
+                if not check_password(otp, pending.otp_hash):
+
+                    pending.attempts += 1
+
+                    pending.save(update_fields=["attempts"])
+
+                    if pending.attempts >= 5:
+                        return Response(
+                            {
+                                "success": False,
+                                "error": "Maximum OTP attempts reached. Please resend OTP."
+                            },
+                            status=status.HTTP_429_TOO_MANY_REQUESTS
+                        )
+
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Incorrect OTP.",
+                            "attempts_remaining": 5 - pending.attempts
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # OTP verified successfully
+                data = pending.registration_data
+
+                # Final duplicate checks
+                if User.objects.filter(
+                    email__iexact=data["email"]
+                ).exists():
+                    pending.delete()
+
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Email is already registered."
+                        },
+                        status=status.HTTP_409_CONFLICT
+                    )
+
+                if StudentProfile.objects.filter(
+                    roll_no__iexact=data["roll_no"]
+                ).exists() or StudentProfile.objects.filter(
+                    student_no__iexact=data["student_no"]
+                ).exists():
+                    pending.delete()
+
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Roll number or student number is already registered."
+                        },
+                        status=status.HTTP_409_CONFLICT
+                    )
+
+                # Generate unique username
+                username_base = slugify(data["name"])[:140] or "student"
+
+                username = (
+                    f"{username_base}_{uuid.uuid4().hex[:8]}"
                 )
 
-            if otp_record.expires_at < timezone.now():
-
-                return Response(
-                    {
-                        "error": "OTP has expired. Please request a new OTP."
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
+                # Create permanent Django User
+                user = User.objects.create_user(
+                    username=username,
+                    email=data["email"],
+                    password=None,
+                    is_active=True
                 )
 
-            if not secrets.compare_digest(
-                str(otp_record.otp),
-                otp
-            ):
-
-                return Response(
-                    {
-                        "error": "Incorrect OTP."
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
+                # Create permanent StudentProfile
+                profile = StudentProfile.objects.create(
+                    user=user,
+                    name=data["name"],
+                    branch=data["branch"],
+                    section=data["section"],
+                    year=data["year"],
+                    residence=data["residence"],
+                    gender=data["gender"],
+                    phone_no=data["phone_no"],
+                    roll_no=data["roll_no"],
+                    student_no=data["student_no"],
+                    is_email_verified=True
                 )
 
-            # Activate student account
+                # Delete temporary registration
+                pending.delete()
 
-            profile.is_email_verified = True
+                # Send QR email after successful DB commit
+                transaction.on_commit(
+                    lambda: send_qr_email_safely(profile)
+                )
 
-            profile.save(
-                update_fields=["is_email_verified"]
+            return Response(
+                {
+                    "success": True,
+                    "message": "Email verified and registration completed successfully.",
+                    "name": profile.name,
+                    "email": user.email,
+                    "student_no": profile.student_no,
+                    "qr_email": "QR email sending was attempted."
+                },
+                status=status.HTTP_200_OK
             )
 
-            user.is_active = True
+        except IntegrityError:
+            logger.exception("Duplicate registration during OTP verification")
 
-            user.save(
-                update_fields=["is_active"]
+            return Response(
+                {
+                    "success": False,
+                    "error": "Registration details already exist. Please contact support if this continues."
+                },
+                status=status.HTTP_409_CONFLICT
             )
 
-            # Delete used OTP
+        except Exception:
+            logger.exception("OTP verification failed")
 
-            EmailOTP.objects.filter(
-                user=user
-            ).delete()
-
-            # Send QR email after database commit
-
-            transaction.on_commit(
-                lambda: send_qr_email_safely(profile)
+            return Response(
+                {
+                    "success": False,
+                    "error": "Unable to verify registration. Please try again."
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        return Response(
-            {
-                "success": True,
-                "message": "Email verified successfully. Your account is activated.",
-                "student_no": profile.student_no,
-                "qr_email": "QR email sending was attempted."
-            },
-            status=status.HTTP_200_OK
-        )
 
 
 # --------------------------------------------------
 # RESEND OTP API
 # --------------------------------------------------
+
 
 class ResendOTPView(APIView):
 
@@ -407,95 +534,113 @@ class ResendOTPView(APIView):
         ).strip()
 
         if not email or not student_no:
-
             return Response(
                 {
+                    "success": False,
                     "error": "Email and student number are required."
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         try:
-
-            profile = StudentProfile.objects.select_related(
-                "user"
-            ).get(
-                student_no=student_no,
-                user__email__iexact=email
-            )
-
-        except StudentProfile.DoesNotExist:
-
-            return Response(
-                {
-                    "error": "Student account not found."
-                },
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        user = profile.user
-
-        if profile.is_email_verified or user.is_active:
-
-            return Response(
-                {
-                    "error": "This student is already verified. Please login."
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        otp = generate_otp()
-
-        try:
-
             with transaction.atomic():
 
-                # Remove previous OTP
+                pending = PendingRegistration.objects.select_for_update().filter(
+                    registration_data__email=email,
+                    registration_data__student_no=student_no
+                ).first()
 
-                EmailOTP.objects.filter(
-                    user=user
-                ).delete()
-
-                # Create new OTP
-
-                EmailOTP.objects.create(
-                    user=user,
-                    otp=otp,
-                    expires_at=(
-                        timezone.now() + timedelta(minutes=5)
+                if pending is None:
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Pending registration not found."
+                        },
+                        status=status.HTTP_404_NOT_FOUND
                     )
+
+                now = timezone.now()
+
+                if pending.registration_expires_at <= now:
+                    pending.delete()
+
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Registration expired. Please register again."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # 60-second resend cooldown
+                elapsed = (
+                    now - pending.otp_last_sent_at
+                ).total_seconds()
+
+                if elapsed < 60:
+                    remaining = max(1, 60 - int(elapsed))
+
+                    return Response(
+                        {
+                            "success": False,
+                            "error": "Please wait before requesting another OTP.",
+                            "retry_after": remaining
+                        },
+                        status=status.HTTP_429_TOO_MANY_REQUESTS
+                    )
+
+                # Generate new OTP
+                otp = generate_otp()
+
+                pending.otp_hash = make_password(otp)
+
+                pending.otp_expires_at = (
+                    now + timedelta(minutes=5)
+                )
+
+                pending.otp_last_sent_at = now
+
+                pending.attempts = 0
+
+                pending.save(
+                    update_fields=[
+                        "otp_hash",
+                        "otp_expires_at",
+                        "otp_last_sent_at",
+                        "attempts"
+                    ]
                 )
 
                 # Send new OTP
-
-                email_sent = send_student_otp(
-                    user,
-                    profile.name,
+                email_sent = send_pending_registration_otp(
+                    email,
+                    pending.registration_data["name"],
                     otp
                 )
 
                 if email_sent != 1:
-                    raise RuntimeError("OTP email could not be sent")
-
-        except Exception:
-
-            logger.exception("OTP resend failed")
+                    raise RuntimeError("OTP resend failed")
 
             return Response(
                 {
-                    "error": "Unable to send OTP. Please try again later."
+                    "success": True,
+                    "message": "A new OTP has been sent successfully.",
+                    "student_no": student_no
+                },
+                status=status.HTTP_200_OK
+            )
+
+        except Exception:
+            logger.exception("Registration OTP resend failed")
+
+            return Response(
+                {
+                    "success": False,
+                    "error": "Unable to resend OTP. Please try again later."
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        return Response(
-            {
-                "success": True,
-                "message": "A new OTP has been sent successfully.",
-                "student_no": profile.student_no
-            },
-            status=status.HTTP_200_OK
-        )
 
 
 # --------------------------------------------------
