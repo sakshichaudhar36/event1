@@ -10,7 +10,12 @@ from accounts.permissions import IsSuperUser
 from accounts.models import StudentProfile
 from qr.models import StudentQR
 from .models import Attendance
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
+from accounts.throttles import (
+    AttendanceLookupThrottle,
+    AttendanceMarkThrottle,
+)
 
 # --------------------------------------------------
 # HELPER: STUDENT DETAILS
@@ -86,8 +91,13 @@ def mark_student_attendance(student, method):
 # --------------------------------------------------
 
 class QRStudentLookupView(APIView):
-
     permission_classes = [IsSuperUser]
+
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        AttendanceLookupThrottle,
+    ]
 
     def post(self, request):
 
@@ -138,6 +148,11 @@ class QRStudentLookupView(APIView):
 # --------------------------------------------------
 
 class StudentLookupView(APIView):
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        AttendanceLookupThrottle,
+    ]
 
     permission_classes = [IsSuperUser]
 
@@ -188,6 +203,11 @@ class StudentLookupView(APIView):
 # --------------------------------------------------
 
 class QRAttendanceView(APIView):
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        AttendanceMarkThrottle,
+    ]
 
     permission_classes = [IsSuperUser]
 
@@ -222,6 +242,11 @@ class QRAttendanceView(APIView):
 # --------------------------------------------------
 
 class ManualAttendanceView(APIView):
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        AttendanceMarkThrottle,
+    ]
 
     permission_classes = [IsSuperUser]
 
@@ -254,6 +279,11 @@ class ManualAttendanceView(APIView):
 # --------------------------------------------------
 
 class AttendanceListView(APIView):
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        AttendanceLookupThrottle,
+    ]
 
     permission_classes = [IsSuperUser]
 
@@ -292,6 +322,11 @@ class AttendanceListView(APIView):
 # --------------------------------------------------
 
 class AttendanceSummaryView(APIView):
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        AttendanceLookupThrottle,
+    ]
 
     permission_classes = [IsSuperUser]
 

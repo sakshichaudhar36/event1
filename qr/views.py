@@ -1,14 +1,21 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.throttling import UserRateThrottle
 from django.http import HttpResponse
 
 from .models import StudentQR
 from .services import generate_qr_image
+from accounts.throttles import QRThrottle
 
 
 class MyQRCodeView(APIView):
     permission_classes = [IsAuthenticated]
+
+    throttle_classes = [
+        UserRateThrottle,
+        QRThrottle,
+    ]
 
     def get(self, request):
 

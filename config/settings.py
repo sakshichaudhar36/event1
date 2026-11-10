@@ -71,6 +71,8 @@ INSTALLED_APPS = [
     "accounts",
     "events",
     "qr",
+
+    'import_export',
 ]
 
 
@@ -137,17 +139,17 @@ WSGI_APPLICATION = "config.wsgi.application"
 # DATABASE - POSTGRESQL
 # --------------------------------------------------
 
-
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": os.getenv("PGDATABASE"),
         "USER": os.getenv("PGUSER"),
         "PASSWORD": os.getenv("PGPASSWORD"),
-        "HOST": os.getenv("PGHOST"),
+        "HOST": os.getenv("PGHOST", "127.0.0.1"),
         "PORT": os.getenv("PGPORT", "5432"),
         "OPTIONS": {
-            "sslmode": "require",
+            #"sslmode": "require","
+            "sslmode": os.getenv("PGSSLMODE", "disable"),
         },
     }
 }
@@ -220,16 +222,36 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # --------------------------------------------------
 
 REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.TokenAuthentication",
-        "rest_framework.authentication.SessionAuthentication",
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
     ],
 
-    "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.AllowAny",
-    ],
+
+    'DEFAULT_THROTTLE_RATES': {
+        # General protection for all APIs
+        'anon': '60/minute',
+        'user': '120/minute',
+
+        # Accounts APIs
+        'register': '5/minute',
+        'otp': '3/minute',
+        'login': '3/minute',
+        'resend_otp': '3/minute',
+        'delete_registration': '5/minute',
+
+        # Events APIs
+        'event_register': '5/minute',
+        'event_list': '30/minute',
+        'event_details': '30/minute',
+
+        # QR APIs
+        'qr': '10/minute',
+
+        'attendance_lookup': '30/minute',
+        'attendance_mark': '10/minute',
+    },
 }
-
 
 # --------------------------------------------------
 # EMAIL CONFIGURATION - GMAIL SMTP

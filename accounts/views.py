@@ -33,6 +33,18 @@ from qr.services import send_student_qr_email
 
 from django.contrib.auth.hashers import make_password, check_password
 from django.db import IntegrityError
+from rest_framework.throttling import (
+    AnonRateThrottle,
+    UserRateThrottle,
+)
+
+from .throttles import (
+    LoginRateThrottle,
+    OTPRateThrottle,
+    RegisterRateThrottle,
+    ResendOTPThrottle,
+    DeleteRegistrationThrottle,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -155,6 +167,12 @@ def send_qr_email_safely(profile):
 
 
 class RegisterView(APIView):
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        RegisterRateThrottle,
+    ]
+    
 
     def post(self, request):
 
@@ -300,6 +318,11 @@ class RegisterView(APIView):
 
 
 class VerifyOTPView(APIView):
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        OTPRateThrottle,
+    ]
 
     def post(self, request):
 
@@ -522,6 +545,12 @@ class VerifyOTPView(APIView):
 
 
 class ResendOTPView(APIView):
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        ResendOTPThrottle,
+    ]
+
 
     def post(self, request):
 
@@ -648,6 +677,11 @@ class ResendOTPView(APIView):
 # --------------------------------------------------
 
 class LoginView(APIView):
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        LoginRateThrottle,
+    ]
 
     def post(self, request):
 
@@ -749,6 +783,11 @@ class LoginView(APIView):
 # --------------------------------------------------
 
 class VerifyLoginOTPView(APIView):
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        OTPRateThrottle,
+    ]
 
     def post(self, request):
 
@@ -862,6 +901,11 @@ class VerifyLoginOTPView(APIView):
             status=status.HTTP_200_OK
         )
 class SuperuserLoginView(APIView):
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        LoginRateThrottle,
+    ]
 
     def post(self, request):
 
@@ -901,6 +945,11 @@ class SuperuserLoginView(APIView):
         )
 
 class DeleteRegistrationView(APIView):
+    throttle_classes = [
+        AnonRateThrottle,
+        UserRateThrottle,
+        DeleteRegistrationThrottle,
+    ]
 
     permission_classes = [IsSuperUser]
 
